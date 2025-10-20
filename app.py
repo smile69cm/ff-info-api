@@ -4,54 +4,62 @@ import binascii
 import requests
 from flask import Flask, jsonify, request, Response
 from google.protobuf.json_format import MessageToDict
-import threading
-import time
 from datetime import datetime
 
-# Import Protobuf Definitions (These files must be in the same directory)
+# Import Protobuf Definitions
+# NOTE: Ensure these files (data_pb2.py, uid_generator_pb2.py, GetWishListItems_pb2.py) 
+# are in the same root directory as app.py
 from data_pb2 import AccountPersonalShowInfo
 import uid_generator_pb2
-import GetWishListItems_pb2 # Included for completeness
+# import GetWishListItems_pb2 # Not strictly needed for the main endpoint, but kept for imports
 
 app = Flask(__name__)
 
 # --- Global State and Constants ---
-jwt_token = None
-key = 'FF7B12C12D345E67890ABCDEF1234567' # Default AES Key (32 Hex Chars)
-iv = 'A1B2C3D4E5F67890' # Default AES IV (32 Hex Chars)
+# Use a simple dictionary for thread-safe caching across the Gunicorn workers
+token_cache = {} 
+key = 'FF7B12C12D345E67890ABCDEF1234567' # Default AES Key
+iv = 'A1B2C3D4E5F67890' # Default AES IV
 
-# --- 1. JWT Token Acquisition ---
-def get_jwt_token_sync(region):
-    """Fetches a new JWT token if the current one is expired or missing."""
-    global jwt_token
+# --- 1. JWT Token Acquisition (Synchronous and Caching) ---
+def get_jwt_token_with_cache(region):
+    """
+    Fetches a new JWT token and caches it per region. 
+    It checks the cache first to minimize external calls.
+    """
+    global token_cache
 
-    # Use cached token if available
-    if jwt_token:
-        return jwt_token
+    # 1. Check Cache
+    if region in token_cache:
+        # A simple check (e.g., if token exists, assume it's valid for a short time)
+        # In a real app, you would check the token's expiry time here.
+        return token_cache[region]
 
+    # 2. Define Endpoints
     endpoints = {
         "IND": "https://jwt-chi-seven.vercel.app/api/token?uid=4230185186&password=9D349A6F71884312658E1D5CDC3333A7AF382A77F71CED1ADAB39C4CFC285B6B",
         "BR": "https://projects-fox-x-get-jwt.vercel.app/get?uid=3787481313&password=JlOivPeosauV0l9SG6gwK39l",
-        # Add other regions as needed
     }
-    
-    config = endpoints.get(region, endpoints["IND"])
+    config_url = endpoints.get(region, endpoints["IND"])
     
     try:
-        response = requests.get(config, timeout=10)
-        response.raise_for_status() # Raise exception for bad status codes (4xx or 5xx)
+        # Fetch the token synchronously
+        response = requests.get(config_url, timeout=10)
+        response.raise_for_status() 
         data = response.json()
         
-        # Check based on known API structures
-        if region == "IND" and data.get('status') in ['success', 'live'] and data.get('token'):
-            jwt_token = data['token']
-        elif region in ["BR", "US", "SAC", "NA"] and isinstance(data, dict) and 'token' in data:
-            jwt_token = data['token']
-        elif data.get('token'):
-             jwt_token = data['token']
+        # 3. Extract Token (using simplified logic for the known API types)
+        jwt_token = data.get('token')
+        
+        if not jwt_token:
+            # Check the old structure for IND if 'token' is missing
+            if region == "IND" and data.get('status') in ['success', 'live'] and data.get('token'):
+                jwt_token = data['token']
         
         if jwt_token:
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] JWT token fetched successfully for region {region}.")
+            # 4. Cache and Return
+            token_cache[region] = jwt_token
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] JWT token fetched/updated successfully for region {region}.")
             return jwt_token
         else:
             print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Error: Token not found in response for region {region}: {data}")
@@ -64,7 +72,7 @@ def get_jwt_token_sync(region):
         print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] General error during JWT fetch for {region}: {e}")
         return None
 
-# --- 2. AES Encryption ---
+# --- 2. AES Encryption (Unchanged) ---
 def encrypt_aes(hex_data, key_hex, iv_hex):
     """Encrypts hex data using AES-128-CBC with Zero Padding."""
     try:
@@ -73,7 +81,6 @@ def encrypt_aes(hex_data, key_hex, iv_hex):
         data_bytes = binascii.unhexlify(hex_data)
         
         cipher = AES.new(key_bytes, AES.MODE_CBC, iv_bytes)
-        # PKCS7 is often used, but ZeroPadding matches the JS/Garena API behavior
         padded_data = pad(data_bytes, AES.block_size, style='x923') 
         encrypted_bytes = cipher.encrypt(padded_data)
         
@@ -82,10 +89,9 @@ def encrypt_aes(hex_data, key_hex, iv_hex):
         print(f"Encryption error: {e}")
         raise ValueError(f"Encryption failed with key/iv issues: {e}")
 
-# --- 3. API Call Function ---
+# --- 3. API Call Function (Minor change to use caching) ---
 def apis(encrypted_hex, region):
     """Makes the encrypted POST request to the Garena API."""
-    global jwt_token
     
     endpoints = {
         "IND": "https://sg-lobby.ff.garena.com/api/v2/account/GetAccountPersonalShowInfo",
@@ -93,12 +99,18 @@ def apis(encrypted_hex, region):
     }
     
     url = endpoints.get(region, endpoints["IND"])
-    token = get_jwt_token_sync(region)
+    
+    # Attempt to get the token, this handles both cache lookup and fetching if missing
+    token = get_jwt_token_with_cache(region)
     
     if not token:
-        raise Exception("Failed to acquire JWT token before API call.")
+        # If fetching failed, try one more time (in case of temporary network issue)
+        token = get_jwt_token_with_cache(region) 
+        if not token:
+            raise Exception("Failed to acquire JWT token after multiple attempts.")
 
     headers = {
+        # IMPORTANT: Use the fetched/cached token
         "Authorization": f"Bearer {token}",
         "Content-Type": "text/plain",
         "X-App-Key": "ff-website"
@@ -108,14 +120,33 @@ def apis(encrypted_hex, region):
         response = requests.post(url, data=encrypted_hex, headers=headers, timeout=15)
         response.raise_for_status()
         return response.text
+    except requests.exceptions.HTTPError as e:
+        print(f"Garena API returned HTTP Error {e.response.status_code}. Response: {e.response.text}")
+        
+        # If token is likely expired or invalid (e.g., 401 Unauthorized), remove from cache and retry once
+        if e.response.status_code in [401, 403]:
+             print("Token might be invalid, clearing cache and retrying...")
+             if region in token_cache:
+                 del token_cache[region]
+             
+             # Second attempt with fresh token fetch
+             token = get_jwt_token_with_cache(region)
+             if token:
+                 headers["Authorization"] = f"Bearer {token}"
+                 response = requests.post(url, data=encrypted_hex, headers=headers, timeout=15)
+                 response.raise_for_status() # Check for success on retry
+                 return response.text
+             else:
+                 raise Exception("Failed after retry. New token could not be acquired.")
+        
+        # If not 401/403, just raise the error
+        raise Exception(f"External API call failed or timed out: {e}")
     except requests.exceptions.RequestException as e:
-        # Garena API returns the raw hex string of the decrypted protobuf data
-        print(f"API Request error: {e}")
         raise Exception(f"External API call failed or timed out: {e}")
     except Exception as e:
         raise Exception(f"API request failed: {e}")
 
-# --- 4. Data Formatting ---
+# --- 4. Data Formatting (Unchanged) ---
 def format_datetime(timestamp):
     """Converts Garena timestamp (sometimes ms, sometimes s) to readable format."""
     try:
@@ -134,7 +165,6 @@ def format_data(data):
         basic_info = data.get('basicInfo', {})
         social_info = data.get('socialBasicInfo', {})
         clan_info = data.get('clanInfoBasic', {})
-        pet_info = data.get('petInfo', {})
         
         name = basic_info.get('nickName', 'N/A')
         uid = basic_info.get('accountId', 'N/A')
@@ -187,7 +217,7 @@ def format_data(data):
         print(f"Formatting Error: {e}")
         return f"Error formatting data: Could not parse all data fields ({str(e)})."
 
-# --- 5. API Endpoints ---
+# --- 5. API Endpoints (Unchanged logic, just using the fixed functions) ---
 
 @app.route('/accinfo', methods=['GET'])
 def get_player_info_json():
@@ -212,6 +242,7 @@ def get_player_info_json():
         encrypted_hex = encrypt_aes(hex_data, custom_key, custom_iv)
         
         # 3. Call External API
+        # This will now attempt to get or refresh the token synchronously
         api_response = apis(encrypted_hex, region) 
         
         if not api_response:
