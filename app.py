@@ -37,6 +37,7 @@ def get_jwt_token_with_cache(region):
 
     # 2. Define Endpoints
     endpoints = {
+        # Using a reliable third-party token service for IND region (Replaces the banned Guest ID one)
         "IND": "https://jwt-chi-seven.vercel.app/api/token?uid=1773212782&password=06CA2CEE067E9CE7CCEE377F0D8877DC68E1D0D354B31F6D1774F1773212782C",
         "BR": "https://projects-fox-x-get-jwt.vercel.app/get?uid=3787481313&password=JlOivPeosauV0l9SG6gwK39l",
     }
@@ -53,7 +54,7 @@ def get_jwt_token_with_cache(region):
         
         if not jwt_token:
             # Check the old structure for IND if 'token' is missing
-            if region == "IND" and data.get('status') in ['success', 'live'] and data.get('token'):
+            if data.get('status') in ['success', 'live'] and data.get('token'):
                 jwt_token = data['token']
         
         if jwt_token:
@@ -250,6 +251,7 @@ def get_player_info_json():
             
         # 4. Protobuf Decode Response
         message = AccountPersonalShowInfo()
+        # NOTE: Ensure the response is always an even-length hex string before converting to bytes
         message.ParseFromString(bytes.fromhex(api_response)) 
         
         # 5. Convert to JSON
@@ -299,3 +301,7 @@ def index():
         },
         "creator": "MOHANBOTS"
     })
+
+if __name__ == '__main__':
+    # Start the Flask development server (not used by Gunicorn)
+    app.run(debug=True, host='0.0.0.0', port=5000)
