@@ -37,7 +37,7 @@ def get_jwt_token_with_cache(region):
 
     # 2. Define Endpoints
     endpoints = {
-        "IND": "https://jwt-chi-seven.vercel.app/api/token?uid=4230185186&password=9D349A6F71884312658E1D5CDC3333A7AF382A77F71CED1ADAB39C4CFC285B6B",
+        "IND": "https://jwt-chi-seven.vercel.app/api/token?uid=1773212782&password=06CA2CEE067E9CE7CCEE377F0D8877DC68E1D0D354B31F6D1774F1773212782C",
         "BR": "https://projects-fox-x-get-jwt.vercel.app/get?uid=3787481313&password=JlOivPeosauV0l9SG6gwK39l",
     }
     config_url = endpoints.get(region, endpoints["IND"])
